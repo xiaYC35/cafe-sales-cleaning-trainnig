@@ -13,7 +13,11 @@ from tensorflow.keras.models import Sequential
 from tensorflow.keras.layers import LSTM, Dense
 import matplotlib.pyplot as plt
 
-
+import pandas as pd
+import numpy as np
+from sklearn.preprocessing import MinMaxScaler
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import LSTM, Dense
 def predict_next_months_df(df, months_ahead=5, seq_length=3, plot=True):
     """
     使用 LSTM 模型预测未来 months_ahead 个月的营业额。
@@ -97,4 +101,57 @@ def predict_next_months_df(df, months_ahead=5, seq_length=3, plot=True):
 
     return pred_df
 
-
+def predict_payment_usage_lstm(df, payment_col='Payment Method', date_col='Transaction Date', n_months=5, seq_length=3):
+    """
+    使用 LSTM 预测未来 n_months 每种支付方式的使用次数
+    df: 清洗后的交易数据
+    payment_col: 支付方式列名
+    date_col: 日期列名
+    n_months: 预测未来几个月
+    seq_length: LSTM 输入序列长度
+    """
+    df[date_col] = pd.to_datetime(df[date_col])
+    df['Month'] = df[date_col].dt.to_period('M')
+    
+    # 1️⃣ 按月、支付方式统计使用次数
+    monthly_counts = df.groupby(['Month', payment_col]) \
+                       .size().unstack(fill_value=0)
+    
+    predictions = {}
+    
+    for payment in monthly_counts.columns:
+        series = monthly_counts[payment].values.astype(float).reshape(-1,1)
+        scaler = MinMaxScaler()
+        series_scaled = scaler.fit_transform(series)
+        
+        # 构建序列
+        X, y = [], []
+        for i in range(len(series_scaled) - seq_length):
+            X.append(series_scaled[i:i+seq_length])
+            y.append(series_scaled[i+seq_length])
+        X, y = np.array(X), np.array(y)
+        
+        # LSTM 模型
+        model = Sequential()
+        model.add(LSTM(50, activation='relu', input_shape=(seq_length,1)))
+        model.add(Dense(1))
+        model.compile(optimizer='adam', loss='mse')
+        model.fit(X, y, epochs=100, verbose=0)
+        
+        # 预测未来 n_months
+        last_seq = series_scaled[-seq_length:].reshape(1, seq_length, 1)
+        pred_scaled = []
+        for _ in range(n_months):
+            next_pred = model.predict(last_seq, verbose=0)
+            pred_scaled.append(next_pred[0,0])
+            last_seq = np.concatenate([last_seq[:,1:,:], next_pred.reshape(1,1,1)], axis=1)
+        
+        pred_counts = scaler.inverse_transform(np.array(pred_scaled).reshape(-1,1)).flatten()
+        predictions[payment] = pred_counts.astype(int)  # 转为整数
+        
+    # 构造预测 DataFrame
+    last_month = monthly_counts.index[-1].to_timestamp()
+    months = pd.date_range(start=last_month + pd.offsets.MonthBegin(1), periods=n_months, freq='MS')
+    pred_df = pd.DataFrame(predictions, index=months)
+    
+    return pred_df
